@@ -65,7 +65,7 @@ except FileNotFoundError:
     st.error(
         "CSV 파일을 찾을 수 없습니다. "
         "app.py와 같은 폴더에 "
-        "countriesMBTI_16types.csv를 넣어주세요."
+        "countriesMBTI_16types(1).csv를 넣어주세요."
     )
     st.stop()
 
