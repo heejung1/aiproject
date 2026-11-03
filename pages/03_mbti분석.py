@@ -21,7 +21,7 @@ st.write("궁금한 국가를 선택하고 MBTI 유형별 비율을 확인해 �
 # 2. CSV 파일 불러오기
 # =====================================
 
-CSV_PATH = Path(__file__).parent / "countriesMBTI_16types.csv"
+CSV_PATH = Path(__file__).parent / "countriesMBTI_16types(1).csv"
 
 @st.cache_data
 def load_data():
