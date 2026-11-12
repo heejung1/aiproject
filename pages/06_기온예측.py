@@ -31,7 +31,7 @@ st.divider()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-DATA_PATH = BASE_DIR / "temperature(1).csv"
+DATA_PATH = BASE_DIR / "temperature.csv"
 
 # ==========================================
 # 3. 한글 폰트 설정
