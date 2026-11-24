@@ -1,15 +1,16 @@
-import io
-import zipfile
-from pathlib import Path
 
-import numpy as np
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import streamlit as st
+from pathlib import Path
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
 
+# --------------------------------------------------
+# 기본 설정
+# --------------------------------------------------
 st.set_page_config(
     page_title="서울 제과·제빵 상권 분석",
     page_icon="🥐",
@@ -17,24 +18,60 @@ st.set_page_config(
 )
 
 DATA_DIR = Path(__file__).parent / "data"
+SALES_FILE = DATA_DIR / "sales_2025.csv"
+STORES_FILE = DATA_DIR / "stores_2025.csv"
 
-SALES_COLUMNS = {
+st.title("🥐 서울 제과·제빵 상권 분석 시스템")
+st.write(
+    "서울시 2025년 상권분석서비스 CSV 자료를 이용해 "
+    "제과점·커피음료 업종의 매출과 점포 현황을 분석합니다."
+)
+st.caption(
+    "자료: 서울시 상권분석서비스 · 추정매출-상권 / 점포-상권 · "
+    "2025년 1~4분기"
+)
+
+# --------------------------------------------------
+# CSV 불러오기
+# --------------------------------------------------
+@st.cache_data(show_spinner="CSV 데이터를 불러오는 중...")
+def read_csv_file(file_bytes):
+    """CSV 파일을 여러 인코딩으로 시도해 읽습니다."""
+    last_error = None
+    for encoding in ("cp949", "utf-8-sig", "euc-kr", "utf-8"):
+        try:
+            from io import BytesIO
+            return pd.read_csv(
+                BytesIO(file_bytes),
+                encoding=encoding,
+                low_memory=False
+            )
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(f"CSV 파일을 읽지 못했습니다: {last_error}")
+
+
+def load_data(uploaded_file, local_path):
+    """업로드 파일이 있으면 업로드 파일, 없으면 data 폴더 파일을 사용합니다."""
+    if uploaded_file is not None:
+        return read_csv_file(uploaded_file.getvalue())
+    if local_path.exists():
+        return read_csv_file(local_path.read_bytes())
+    return None
+
+
+# 실제 업로드된 CSV의 열 이름에 맞춘 설정
+SALES_REQUIRED = {
     "quarter": "기준_년분기_코드",
-    "market_type": "상권_구분_코드_명",
-    "market_code": "상권_코드",
     "market": "상권_코드_명",
-    "industry_code": "서비스_업종_코드",
     "industry": "서비스_업종_코드_명",
     "sales": "당월_매출_금액",
     "transactions": "당월_매출_건수",
 }
 
-STORE_COLUMNS = {
+STORE_REQUIRED = {
     "quarter": "stdr_yyqu_cd",
-    "market_type": "trdar_se_cd_nm",
-    "market_code": "trdar_cd",
     "market": "trdar_cd_nm",
-    "industry_code": "svc_induty_cd",
     "industry": "svc_induty_cd_nm",
     "stores": "stor_co",
     "similar_stores": "similr_induty_stor_co",
@@ -42,472 +79,244 @@ STORE_COLUMNS = {
 }
 
 
-@st.cache_data(show_spinner=False)
-def read_csv_from_zip_bytes(file_bytes):
-    with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
-        csv_names = [
-            n for n in archive.namelist()
-            if n.lower().endswith(".csv")
-        ]
-
-        if not csv_names:
-            raise ValueError(
-                "ZIP 안에서 CSV 파일을 찾지 못했습니다."
-            )
-
-        csv_bytes = archive.read(csv_names[0])
-
-    last_error = None
-
-    for encoding in (
-        "cp949",
-        "utf-8-sig",
-        "euc-kr",
-        "utf-8"
-    ):
-        try:
-            return pd.read_csv(
-                io.BytesIO(csv_bytes),
-                encoding=encoding,
-                low_memory=False
-            )
-        except Exception as exc:
-            last_error = exc
-
-    raise ValueError(
-        f"CSV 인코딩을 읽지 못했습니다: {last_error}"
-    )
-
-
-def load_uploaded_or_local(uploaded_file, local_path):
-    if uploaded_file is not None:
-        return read_csv_from_zip_bytes(
-            uploaded_file.getvalue()
-        )
-
-    if local_path.exists():
-        return read_csv_from_zip_bytes(
-            local_path.read_bytes()
-        )
-
-    return None
-
-
 def make_analysis(sales_raw, stores_raw):
-
+    """분기·상권명·업종명으로 매출 자료와 점포 자료를 결합합니다."""
     missing_sales = [
-        c for c in SALES_COLUMNS.values()
-        if c not in sales_raw.columns
+        col for col in SALES_REQUIRED.values()
+        if col not in sales_raw.columns
     ]
-
     missing_stores = [
-        c for c in STORE_COLUMNS.values()
-        if c not in stores_raw.columns
+        col for col in STORE_REQUIRED.values()
+        if col not in stores_raw.columns
     ]
 
     if missing_sales:
         raise ValueError(
-            "매출 CSV에서 필요한 열을 찾지 못했습니다: "
+            "추정매출 CSV에 필요한 열이 없습니다: "
             + ", ".join(missing_sales)
         )
-
     if missing_stores:
         raise ValueError(
-            "점포 CSV에서 필요한 열을 찾지 못했습니다: "
+            "점포 CSV에 필요한 열이 없습니다: "
             + ", ".join(missing_stores)
         )
 
-    sales = sales_raw[
-        list(SALES_COLUMNS.values())
-    ].rename(
-        columns={
-            v: k for k, v in SALES_COLUMNS.items()
-        }
-    )
+    sales = sales_raw[list(SALES_REQUIRED.values())].rename(
+        columns={value: key for key, value in SALES_REQUIRED.items()}
+    ).copy()
 
-    stores = stores_raw[
-        list(STORE_COLUMNS.values())
-    ].rename(
-        columns={
-            v: k for k, v in STORE_COLUMNS.items()
-        }
-    )
+    stores = stores_raw[list(STORE_REQUIRED.values())].rename(
+        columns={value: key for key, value in STORE_REQUIRED.items()}
+    ).copy()
 
-    key_cols = [
-        "quarter",
-        "market_code",
-        "industry_code"
-    ]
-
+    # 분기 코드는 숫자로 변환
     for frame in (sales, stores):
         frame["quarter"] = pd.to_numeric(
-            frame["quarter"],
-            errors="coerce"
+            frame["quarter"], errors="coerce"
         )
 
-        frame["market_code"] = (
-            frame["market_code"].astype(str)
-        )
+    for col in ("sales", "transactions"):
+        sales[col] = pd.to_numeric(sales[col], errors="coerce")
 
-        frame["industry_code"] = (
-            frame["industry_code"].astype(str)
-        )
+    for col in ("stores", "similar_stores", "franchise_stores"):
+        stores[col] = pd.to_numeric(stores[col], errors="coerce")
 
-    sales["sales"] = pd.to_numeric(
-        sales["sales"],
-        errors="coerce"
-    )
-
-    sales["transactions"] = pd.to_numeric(
-        sales["transactions"],
-        errors="coerce"
-    )
-
-    stores["stores"] = pd.to_numeric(
-        stores["stores"],
-        errors="coerce"
-    )
-
-    stores["similar_stores"] = pd.to_numeric(
-        stores["similar_stores"],
-        errors="coerce"
-    )
-
-    stores["franchise_stores"] = pd.to_numeric(
-        stores["franchise_stores"],
-        errors="coerce"
-    )
+    # 이름 열의 공백 차이를 줄여 결합 정확도를 높입니다.
+    for frame in (sales, stores):
+        for col in ("market", "industry"):
+            frame[col] = frame[col].astype("string").str.strip()
 
     sales = sales.dropna(
-        subset=["quarter", "sales"]
-    )
-
+        subset=["quarter", "market", "industry", "sales"]
+    ).copy()
     stores = stores.dropna(
-        subset=["quarter", "stores"]
-    )
+        subset=["quarter", "market", "industry", "stores"]
+    ).copy()
 
-    sales["quarter"] = (
-        sales["quarter"].astype(int)
-    )
+    sales["quarter"] = sales["quarter"].astype(int)
+    stores["quarter"] = stores["quarter"].astype(int)
 
-    stores["quarter"] = (
-        stores["quarter"].astype(int)
-    )
+    # 분기 + 상권명 + 업종명으로 결합
+    join_keys = ["quarter", "market", "industry"]
 
-    merged = sales.merge(
-        stores[
-            key_cols
-            + [
-                "stores",
-                "similar_stores",
-                "franchise_stores"
-            ]
-        ],
-        on=key_cols,
+    # 동일 결합 키가 여러 개면 중복 점포 자료를 합산
+    if stores.duplicated(join_keys).any():
+        stores = stores.groupby(
+            join_keys, as_index=False
+        ).agg(
+            stores=("stores", "sum"),
+            similar_stores=("similar_stores", "sum"),
+            franchise_stores=("franchise_stores", "sum")
+        )
+
+    result = sales.merge(
+        stores[join_keys + [
+            "stores", "similar_stores", "franchise_stores"
+        ]],
+        on=join_keys,
         how="left",
-        validate="many_to_one"
+        validate="one_to_one"
     )
 
-    merged["stores"] = (
-        merged["stores"].fillna(0)
-    )
+    result["stores"] = result["stores"].fillna(0)
+    result["similar_stores"] = result["similar_stores"].fillna(0)
+    result["franchise_stores"] = result["franchise_stores"].fillna(0)
 
-    merged["sales_per_store"] = np.where(
-        merged["stores"] > 0,
-        merged["sales"] / merged["stores"],
+    result["sales_per_store"] = np.where(
+        result["stores"] > 0,
+        result["sales"] / result["stores"],
         np.nan
     )
 
-    merged["year"] = (
-        merged["quarter"] // 10
-    )
-
-    merged["quarter_no"] = (
-        merged["quarter"] % 10
-    )
-
-    merged["quarter_label"] = merged.apply(
-        lambda r:
-        f"{int(r['year'])}년 "
-        f"{int(r['quarter_no'])}분기",
+    result["year"] = result["quarter"] // 10
+    result["quarter_no"] = result["quarter"] % 10
+    result["quarter_label"] = result.apply(
+        lambda row: (
+            f"{int(row['year'])}년 "
+            f"{int(row['quarter_no'])}분기"
+        ),
         axis=1
     )
 
-    merged["market"] = (
-        merged["market"].fillna("이름 없음")
-    )
-
-    merged["industry"] = (
-        merged["industry"].fillna("업종 미상")
-    )
-
-    merged["market_type"] = (
-        merged["market_type"].fillna("구분 미상")
-    )
-
-    return merged
+    return result
 
 
 def won(value):
     if pd.isna(value):
         return "-"
-
     value = float(value)
-
     if abs(value) >= 100_000_000:
-        return (
-            f"{value / 100_000_000:,.1f}억 원"
-        )
-
+        return f"{value / 100_000_000:,.1f}억 원"
     if abs(value) >= 10_000:
-        return (
-            f"{value / 10_000:,.0f}만 원"
-        )
-
+        return f"{value / 10_000:,.0f}만 원"
     return f"{value:,.0f}원"
 
 
 # --------------------------------------------------
-# 메인 화면
+# 사이드바: 파일 업로드와 분석 조건
 # --------------------------------------------------
-
-st.title(
-    "🥐 서울 제과·제빵 상권 분석 시스템"
-)
-
-st.write(
-    "서울시 2025년 상권분석서비스 자료를 이용해 "
-    "제과점·커피음료 업종의 매출과 점포 현황을 살펴봅니다."
-)
-
-st.caption(
-    "자료: 서울시 상권분석서비스 · "
-    "추정매출-상권 / 점포-상권 · "
-    "2025년 1~4분기"
-)
-
-
-# --------------------------------------------------
-# 데이터 불러오기
-# --------------------------------------------------
-
 with st.sidebar:
-
-    st.header("📂 데이터")
-
+    st.header("📂 데이터 파일")
     st.write(
-        "프로젝트의 `data` 폴더에 원본 ZIP을 넣으면 "
-        "자동으로 불러옵니다. "
-        "다른 자료를 분석하려면 ZIP 파일을 업로드하세요."
+        "기본 CSV는 프로젝트의 data 폴더에서 자동으로 읽습니다. "
+        "다른 자료를 분석하려면 아래에서 업로드하세요."
     )
-
     sales_upload = st.file_uploader(
-        "추정매출-상권 ZIP",
-        type=["zip"]
+        "추정매출-상권 CSV",
+        type=["csv"],
+        key="sales_csv"
     )
-
     stores_upload = st.file_uploader(
-        "점포-상권 ZIP",
-        type=["zip"]
+        "점포-상권 CSV",
+        type=["csv"],
+        key="stores_csv"
     )
-
-    st.divider()
-
-    st.header("🔎 분석 조건")
-
 
 try:
-
-    sales_raw = load_uploaded_or_local(
-        sales_upload,
-        DATA_DIR / "sales_2025.zip"
-    )
-
-    stores_raw = load_uploaded_or_local(
-        stores_upload,
-        DATA_DIR / "stores_2025.zip"
-    )
+    sales_raw = load_data(sales_upload, SALES_FILE)
+    stores_raw = load_data(stores_upload, STORES_FILE)
 
     if sales_raw is None or stores_raw is None:
-
         st.warning(
-            "매출 ZIP과 점포 ZIP을 모두 `data` 폴더에 "
-            "넣거나 왼쪽 메뉴에서 업로드해 주세요."
+            "매출 CSV와 점포 CSV가 필요합니다. "
+            "프로젝트의 data 폴더에 두 파일을 넣거나 "
+            "왼쪽 메뉴에서 각각 업로드해 주세요."
         )
-
         st.stop()
 
-    data = make_analysis(
-        sales_raw,
-        stores_raw
-    )
+    data = make_analysis(sales_raw, stores_raw)
 
 except Exception as exc:
-
-    st.error(
-        f"데이터를 불러오는 중 문제가 발생했습니다: {exc}"
-    )
-
+    st.error(f"데이터 처리 중 오류가 발생했습니다: {exc}")
     st.stop()
 
-
-# --------------------------------------------------
-# 분석 조건 설정
-# --------------------------------------------------
-
-all_industries = sorted(
-    data["industry"].dropna().unique().tolist()
+# 실제 결합 상태 안내
+matched_rows = int(data["stores"].gt(0).sum())
+st.sidebar.success(
+    f"데이터 결합 완료: {len(data):,}개 매출 행"
 )
 
-preferred = [
-    name for name in all_industries
-    if name in ["제과점", "커피-음료"]
-]
+with st.sidebar:
+    st.caption(
+        f"점포 수가 연결된 행: {matched_rows:,}개"
+    )
+    st.divider()
+    st.header("🔎 분석 조건")
 
+all_industries = sorted(data["industry"].dropna().unique().tolist())
+preferred = [
+    item for item in ("제과점", "커피-음료")
+    if item in all_industries
+]
 if not preferred:
     preferred = all_industries
 
-
 with st.sidebar:
-
     selected_industries = st.multiselect(
         "업종 선택",
-        all_industries,
+        options=all_industries,
         default=preferred
     )
 
-    market_types = sorted(
-        data["market_type"].dropna().unique().tolist()
-    )
-
-    selected_market_types = st.multiselect(
-        "상권 유형",
-        market_types,
-        default=market_types
-    )
-
-    all_markets = sorted(
-        data[
-            data["market_type"].isin(
-                selected_market_types
-            )
-        ]["market"].unique()
-    )
-
+    all_markets = sorted(data["market"].dropna().unique().tolist())
     selected_markets = st.multiselect(
         "상권 선택 (비우면 전체)",
-        all_markets,
+        options=all_markets,
         default=[]
     )
 
-
 if not selected_industries:
-
-    st.warning(
-        "분석할 업종을 하나 이상 선택해 주세요."
-    )
-
+    st.warning("분석할 업종을 하나 이상 선택해 주세요.")
     st.stop()
-
 
 filtered = data[
     data["industry"].isin(selected_industries)
-    & data["market_type"].isin(
-        selected_market_types
-    )
 ].copy()
 
-
 if selected_markets:
-
     filtered = filtered[
         filtered["market"].isin(selected_markets)
     ]
 
-
 if filtered.empty:
-
-    st.warning(
-        "선택한 조건에 해당하는 데이터가 없습니다."
-    )
-
+    st.warning("선택한 조건에 해당하는 데이터가 없습니다.")
     st.stop()
 
-
-quarters = sorted(
-    filtered["quarter"].unique()
-)
-
-latest_q = max(quarters)
-
-latest = filtered[
-    filtered["quarter"] == latest_q
-].copy()
-
+latest_q = int(filtered["quarter"].max())
+latest = filtered[filtered["quarter"] == latest_q].copy()
 
 # --------------------------------------------------
 # 탭 구성
 # --------------------------------------------------
-
-tab1, tab2, tab3, tab4 = st.tabs(
-    [
-        "📊 전체 상권 현황",
-        "⚖️ 지역·업종 비교",
-        "🤖 AI 매출 예측",
-        "📥 데이터 다운로드"
-    ]
-)
-
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 전체 상권 현황",
+    "⚖️ 지역·업종 비교",
+    "🤖 AI 매출 예측",
+    "📥 데이터 다운로드"
+])
 
 # --------------------------------------------------
-# 1. 전체 상권 현황
+# 탭 1: 전체 상권 현황
 # --------------------------------------------------
-
 with tab1:
-
     st.header("최근 분기 상권 현황")
 
     total_sales = latest["sales"].sum()
-
     total_stores = latest["stores"].sum()
+    total_transactions = latest["transactions"].sum()
 
-    total_transactions = (
-        latest["transactions"].sum()
-    )
-
-    avg_sales_per_store = (
-        total_sales / total_stores
-        if total_stores > 0
-        else np.nan
-    )
-
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric(
-        "추정 매출 합계",
-        won(total_sales)
-    )
-
-    c2.metric(
-        "점포 수 합계",
-        f"{total_stores:,.0f}개"
-    )
-
-    c3.metric(
-        "매출 건수 합계",
-        f"{total_transactions:,.0f}건"
-    )
+    col1, col2, col3 = st.columns(3)
+    col1.metric("추정 매출 합계", won(total_sales))
+    col2.metric("점포 수 합계", f"{total_stores:,.0f}개")
+    col3.metric("매출 건수 합계", f"{total_transactions:,.0f}건")
 
     st.caption(
-        f"기준: {int(latest_q)//10}년 "
-        f"{int(latest_q)%10}분기 · "
-        "선택 업종 및 상권"
+        f"기준: {latest_q // 10}년 {latest_q % 10}분기"
     )
 
     trend = (
         filtered.groupby(
-            ["quarter", "quarter_label"],
-            as_index=False
+            ["quarter", "quarter_label"], as_index=False
         )
         .agg(
             sales=("sales", "sum"),
@@ -523,31 +332,20 @@ with tab1:
         markers=True,
         title="분기별 추정 매출 변화"
     )
-
     fig.update_layout(
         xaxis_title="분기",
         yaxis_title="추정 매출(원)"
     )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
+    st.plotly_chart(fig, use_container_width=True)
 
     market_rank = (
-        latest.groupby(
-            "market",
-            as_index=False
-        )
+        latest.groupby("market", as_index=False)
         .agg(
             sales=("sales", "sum"),
             stores=("stores", "sum"),
             transactions=("transactions", "sum")
         )
-        .sort_values(
-            "sales",
-            ascending=False
-        )
+        .sort_values("sales", ascending=False)
     )
 
     fig = px.bar(
@@ -562,31 +360,22 @@ with tab1:
             "stores": "점포 수"
         }
     )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
-
+    st.plotly_chart(fig, use_container_width=True)
     st.dataframe(
         market_rank,
         use_container_width=True,
         hide_index=True
     )
 
-
 # --------------------------------------------------
-# 2. 지역·업종 비교
+# 탭 2: 지역·업종 비교
 # --------------------------------------------------
-
 with tab2:
-
     st.header("상권별 경쟁 환경 비교")
 
     compare = (
         latest.groupby(
-            ["market", "industry"],
-            as_index=False
+            ["market", "industry"], as_index=False
         )
         .agg(
             sales=("sales", "sum"),
@@ -603,12 +392,7 @@ with tab2:
 
     metric_choice = st.selectbox(
         "비교 기준",
-        [
-            "추정 매출",
-            "점포 수",
-            "점포당 추정 매출",
-            "매출 건수"
-        ]
+        ["추정 매출", "점포 수", "점포당 추정 매출", "매출 건수"]
     )
 
     metric_map = {
@@ -617,36 +401,24 @@ with tab2:
         "점포당 추정 매출": "sales_per_store",
         "매출 건수": "transactions"
     }
-
-    selected_metric = metric_map[
-        metric_choice
-    ]
-
-    ranked = (
-        compare.sort_values(
-            selected_metric,
-            ascending=False
-        ).head(25)
-    )
+    metric = metric_map[metric_choice]
+    ranked = compare.sort_values(
+        metric, ascending=False
+    ).head(25)
 
     fig = px.bar(
         ranked,
         x="market",
-        y=selected_metric,
+        y=metric,
         color="industry",
         barmode="group",
         title=f"상권별 {metric_choice} 상위 25개"
     )
-
     fig.update_layout(
         xaxis_title="상권",
         yaxis_title=metric_choice
     )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
+    st.plotly_chart(fig, use_container_width=True)
 
     fig = px.scatter(
         compare,
@@ -662,92 +434,56 @@ with tab2:
             "transactions": "매출 건수"
         }
     )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
+    st.plotly_chart(fig, use_container_width=True)
 
     st.dataframe(
-        compare.sort_values(
-            "sales",
-            ascending=False
-        ),
+        compare.sort_values("sales", ascending=False),
         use_container_width=True,
         hide_index=True
     )
 
     st.info(
-        "해석할 때 주의하세요. 매출이 높은 상권은 "
-        "소비 수요가 클 수 있지만, 점포 수도 많으면 "
-        "경쟁이 치열할 수 있습니다. "
-        "점포당 매출은 상권 전체 매출을 점포 수로 "
-        "나눈 단순 지표이며 개별 매장의 실제 매출이 아닙니다."
+        "매출이 높은 상권은 소비 수요가 클 수 있지만 "
+        "점포 수도 많으면 경쟁이 치열할 수 있습니다. "
+        "점포당 매출은 상권 전체 매출을 점포 수로 나눈 "
+        "단순 지표이며 개별 매장의 실제 매출이 아닙니다."
     )
 
-
 # --------------------------------------------------
-# 3. AI 매출 예측
+# 탭 3: AI 매출 예측
 # --------------------------------------------------
-
 with tab3:
-
     st.header("🤖 다음 분기 매출 예측")
-
     st.write(
-        "랜덤 포레스트 회귀 모델이 2025년 분기별 "
-        "업종·상권·점포 수 패턴을 학습해 "
+        "랜덤 포레스트 회귀 모델을 이용해 "
+        "상권·업종·분기·점포 수의 패턴으로 "
         "다음 분기 매출을 추정합니다."
     )
 
     model_df = filtered.dropna(
         subset=["sales", "stores"]
     ).copy()
+    model_df = model_df[model_df["stores"] >= 0]
 
-    model_df = model_df[
-        model_df["stores"] >= 0
-    ]
-
-    if (
-        len(model_df) < 30
-        or model_df["quarter"].nunique() < 2
-    ):
-
-        st.warning(
-            "예측을 수행하기에 데이터가 충분하지 않습니다."
-        )
-
+    if len(model_df) < 30 or model_df["quarter"].nunique() < 2:
+        st.warning("예측을 수행하기에 데이터가 충분하지 않습니다.")
     else:
-
         features = model_df[
-            [
-                "market",
-                "industry",
-                "market_type",
-                "quarter_no",
-                "stores"
-            ]
+            ["market", "industry", "quarter_no", "stores"]
         ].copy()
 
         X = pd.get_dummies(
             features,
-            columns=[
-                "market",
-                "industry",
-                "market_type"
-            ],
+            columns=["market", "industry"],
             dtype=int
         )
-
         y = model_df["sales"]
 
-        X_train, X_test, y_train, y_test = (
-            train_test_split(
-                X,
-                y,
-                test_size=0.2,
-                random_state=42
-            )
+        X_train, X_test, y_train, y_test = train_test_split(
+            X,
+            y,
+            test_size=0.2,
+            random_state=42
         )
 
         model = RandomForestRegressor(
@@ -757,137 +493,78 @@ with tab3:
             random_state=42,
             n_jobs=-1
         )
+        model.fit(X_train, y_train)
 
-        model.fit(
-            X_train,
-            y_train
-        )
-
-        validation_pred = model.predict(
-            X_test
-        )
-
-        mae = mean_absolute_error(
-            y_test,
-            validation_pred
-        )
+        validation_pred = model.predict(X_test)
+        mae = mean_absolute_error(y_test, validation_pred)
 
         st.metric(
             "검증 데이터 평균 절대 오차(MAE)",
             won(mae)
         )
-
         st.caption(
-            "검증은 2025년 자료 일부를 무작위로 나누어 "
-            "진행했습니다. 2025년 한 해 자료만 사용하므로 "
-            "장기 추세 예측이 아니라 참고용 패턴 추정입니다."
+            "검증은 2025년 자료 일부를 무작위로 나누어 진행했습니다. "
+            "2025년 4개 분기만 사용하므로 장기 예측이 아닌 "
+            "참고용 패턴 추정입니다."
         )
 
-        last_quarter = int(
-            model_df["quarter"].max()
-        )
-
+        last_quarter = int(model_df["quarter"].max())
         year = last_quarter // 10
-        qtr = last_quarter % 10
+        quarter_no = last_quarter % 10
 
-        if qtr == 4:
-
-            next_quarter = (
-                (year + 1) * 10 + 1
-            )
-
+        if quarter_no == 4:
+            next_quarter = (year + 1) * 10 + 1
         else:
+            next_quarter = year * 10 + quarter_no + 1
 
-            next_quarter = (
-                year * 10 + qtr + 1
-            )
-
-        next_qtr_no = (
-            next_quarter % 10
-        )
+        next_quarter_no = next_quarter % 10
 
         latest_inputs = (
             model_df.sort_values("quarter")
             .groupby(
-                [
-                    "market",
-                    "industry",
-                    "market_type"
-                ],
+                ["market", "industry"],
                 as_index=False
             )
             .tail(1)
             .copy()
         )
-
-        latest_inputs["quarter_no"] = (
-            next_qtr_no
-        )
+        latest_inputs["quarter_no"] = next_quarter_no
 
         future_features = latest_inputs[
-            [
-                "market",
-                "industry",
-                "market_type",
-                "quarter_no",
-                "stores"
-            ]
+            ["market", "industry", "quarter_no", "stores"]
         ]
 
         future_X = pd.get_dummies(
             future_features,
-            columns=[
-                "market",
-                "industry",
-                "market_type"
-            ],
+            columns=["market", "industry"],
             dtype=int
-        ).reindex(
-            columns=X.columns,
-            fill_value=0
-        )
+        ).reindex(columns=X.columns, fill_value=0)
 
-        latest_inputs["predicted_sales"] = (
-            model.predict(future_X)
-        )
+        latest_inputs["predicted_sales"] = model.predict(future_X)
 
         st.success(
             f"예측 대상 분기: "
-            f"{next_quarter // 10}년 "
-            f"{next_qtr_no}분기"
+            f"{next_quarter // 10}년 {next_quarter_no}분기"
         )
 
         forecast = (
-            latest_inputs.groupby(
-                "market",
-                as_index=False
-            )["predicted_sales"]
+            latest_inputs.groupby("market", as_index=False)
+            ["predicted_sales"]
             .sum()
-            .sort_values(
-                "predicted_sales",
-                ascending=False
-            )
+            .sort_values("predicted_sales", ascending=False)
         )
 
         fig = px.bar(
             forecast.head(25),
             x="market",
             y="predicted_sales",
-            title=(
-                "다음 분기 상권별 예측 "
-                "추정 매출 상위 25개"
-            )
+            title="다음 분기 상권별 예측 매출 상위 25개"
         )
-
         fig.update_layout(
             xaxis_title="상권",
             yaxis_title="예측 추정 매출(원)"
         )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
+        st.plotly_chart(fig, use_container_width=True)
 
         st.dataframe(
             forecast,
@@ -895,51 +572,39 @@ with tab3:
             hide_index=True
         )
 
-        forecast_csv = (
-            forecast.to_csv(
-                index=False,
-                encoding="utf-8-sig"
-            ).encode("utf-8-sig")
-        )
+        forecast_csv = forecast.to_csv(
+            index=False,
+            encoding="utf-8-sig"
+        ).encode("utf-8-sig")
 
         st.download_button(
             "예측 결과 CSV 다운로드",
-            forecast_csv,
-            file_name=(
-                "seoul_bakery_sales_forecast.csv"
-            ),
+            data=forecast_csv,
+            file_name="seoul_bakery_sales_forecast.csv",
             mime="text/csv"
         )
 
         st.warning(
             "예측값은 실제 미래 매출이 아닙니다. "
-            "2025년 4개 분기만으로 학습한 결과이므로 "
-            "임대료, 유동인구, 경쟁점포 변화, "
-            "소비심리 등을 반영하지 못합니다."
+            "2025년 4개 분기만으로 학습했으며 임대료, "
+            "유동인구, 경쟁점포 변화, 소비심리 등은 반영하지 못합니다."
         )
 
-
 # --------------------------------------------------
-# 4. 데이터 다운로드
+# 탭 4: CSV 다운로드
 # --------------------------------------------------
-
 with tab4:
-
     st.header("📥 분석 데이터 다운로드")
 
-    csv_bytes = (
-        filtered.to_csv(
-            index=False,
-            encoding="utf-8-sig"
-        ).encode("utf-8-sig")
-    )
+    csv_data = filtered.to_csv(
+        index=False,
+        encoding="utf-8-sig"
+    ).encode("utf-8-sig")
 
     st.download_button(
         "현재 분석 데이터 CSV 다운로드",
-        data=csv_bytes,
-        file_name=(
-            "seoul_bakery_market_analysis.csv"
-        ),
+        data=csv_data,
+        file_name="seoul_bakery_market_analysis.csv",
         mime="text/csv"
     )
 
@@ -949,42 +614,32 @@ with tab4:
         hide_index=True
     )
 
-
 # --------------------------------------------------
-# 데이터 해석 및 진로 연계
+# 진로 연계 및 데이터 한계
 # --------------------------------------------------
-
-with st.expander(
-    "📘 데이터 해석 및 제과·제빵 진로 연계"
-):
-
+with st.expander("📘 데이터 해석 및 제과·제빵 진로 연계"):
     st.markdown("""
     **진로 연계 활용**
 
-    - 제과점 업종을 선택하면 베이커리 전문점의
-      상권별 추정 매출과 점포 수를 비교할 수 있습니다.
-
+    - 제과점 업종을 선택하면 베이커리 전문점의 상권별
+      추정 매출과 점포 수를 비교할 수 있습니다.
     - 커피-음료 업종을 함께 선택하면 카페형 베이커리와
-      연관된 상권 환경을 비교하는 데 참고할 수 있습니다.
-
-    - 매출 규모, 점포 수, 점포당 추정 매출을 함께 살펴보며
+      연관된 상권 환경을 살펴볼 수 있습니다.
+    - 매출 규모, 점포 수, 점포당 추정 매출을 함께 비교해
       창업 후보 상권을 탐색할 수 있습니다.
 
     **데이터의 한계**
 
     - 추정 매출은 개별 점포의 실제 매출이 아니라
       서울시 상권분석서비스의 추정치입니다.
-
-    - 이 자료에는 임대료, 권리금, 유동인구,
-      원재료비, 매장 면적 등이 포함되어 있지 않습니다.
-
-    - 2025년 자료만으로 만든 예측은 표본 기간이 짧아
+    - 현재 매출 CSV에는 상권 코드와 상권 유형 열이 없어
+      분기·상권명·업종명 기준으로 점포 자료와 결합했습니다.
+    - 임대료, 권리금, 유동인구, 원재료비, 매장 면적 등은
+      이 두 CSV만으로 확인할 수 없습니다.
+    - 2025년 4개 분기만으로 만든 예측은 표본 기간이 짧아
       신뢰도에 한계가 있습니다.
-
-    - 상권 비교 결과만으로 창업 성공 가능성을 판단하지 말고
-      현장 조사와 추가 자료를 함께 확인해야 합니다.
+    - 실제 창업 입지는 현장 조사와 추가 자료를 함께 확인해야 합니다.
     """)
-
 
 st.caption(
     "교육·탐구 목적의 분석 도구 | "
